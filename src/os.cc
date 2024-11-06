@@ -1,28 +1,10 @@
-// Copyright 2006 Google Inc. All Rights Reserved.
-// Author: nsanders, menderico
-
-// Licensed under the Apache License, Version 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-
-//      http://www.apache.org/licenses/LICENSE-2.0
-
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-
-// os.cc : os and machine specific implementation
-// This file includes an abstracted interface
-// for linux-distro specific and HW specific
-// interfaces.
-
 #include "os.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#ifdef STRESSAPPTEST_OS_LINUX
 #include <linux/types.h>
+#endif
 #include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -49,6 +31,16 @@
 #include "sattypes.h"
 #include "error_diag.h"
 #include "clock.h"
+
+#ifdef STRESSAPPTEST_OS_DARWIN
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <sys/sysctl.h>
+#include <sys/stat.h>
+#include <sys/param.h>
+#include <sys/ucred.h>
+#include <sys/mount.h>
+#endif
 
 // OsLayer initialization.
 OsLayer::OsLayer() {
@@ -140,6 +132,24 @@ int OsLayer::AddressMode() {
 
 // Translates user virtual to physical address.
 uint64 OsLayer::VirtualToPhysical(void *vaddr) {
+#ifdef STRESSAPPTEST_OS_DARWIN
+  mach_port_t mach_port;
+  mach_vm_address_t address = (mach_vm_address_t)vaddr;
+  mach_vm_size_t size = 0;
+  vm_region_basic_info_data_64_t info;
+  mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+  mach_port_t object_name;
+  kern_return_t kr;
+
+  mach_port = mach_task_self();
+  kr = mach_vm_region(mach_port, &address, &size, VM_REGION_BASIC_INFO_64,
+                      (vm_region_info_t)&info, &count, &object_name);
+  if (kr != KERN_SUCCESS) {
+    return 0;
+  }
+
+  return (uint64)info.reserved;
+#else
   uint64 frame, paddr, pfnmask, pagemask;
   int pagesize = sysconf(_SC_PAGESIZE);
   off_t off = ((uintptr_t)vaddr) / pagesize * 8;
@@ -176,18 +186,37 @@ uint64 OsLayer::VirtualToPhysical(void *vaddr) {
 
   paddr = ((frame & pfnmask) * pagesize) | ((uintptr_t)vaddr & pagemask);
   return paddr;
+#endif
 }
 
 // Returns the HD device that contains this file.
 string OsLayer::FindFileDevice(string filename) {
+#ifdef STRESSAPPTEST_OS_DARWIN
+  struct statfs sfs;
+  if (statfs(filename.c_str(), &sfs) == 0) {
+    return string(sfs.f_mntfromname);
+  }
   return "hdUnknown";
+#else
+  return "hdUnknown";
+#endif
 }
 
 // Returns a list of locations corresponding to HD devices.
 list<string> OsLayer::FindFileDevices() {
+#ifdef STRESSAPPTEST_OS_DARWIN
+  list<string> locations;
+  struct statfs *mounts;
+  int num_mounts = getmntinfo(&mounts, MNT_NOWAIT);
+  for (int i = 0; i < num_mounts; i++) {
+    locations.push_back(string(mounts[i].f_mntfromname));
+  }
+  return locations;
+#else
   // No autodetection on unknown systems.
   list<string> locations;
   return locations;
+#endif
 }
 
 
@@ -228,6 +257,19 @@ void OsLayer::ActivateFlushPageCache(void) {
 
 // Flush the page cache to ensure reads come from the disk.
 bool OsLayer::FlushPageCache(void) {
+#ifdef STRESSAPPTEST_OS_DARWIN
+  if (!use_flush_page_cache_)
+    return true;
+
+  // macOS does not provide a direct way to drop caches. Instead, we can use
+  // the 'purge' command to free up disk space.
+  int result = system("purge");
+  if (result != 0) {
+    logprintf(3, "Log: failed to purge disk cache\n");
+    return false;
+  }
+  return true;
+#else
   if (!use_flush_page_cache_)
     return true;
 
@@ -257,6 +299,7 @@ bool OsLayer::FlushPageCache(void) {
     return false;
   }
   return true;
+#endif
 }
 
 
